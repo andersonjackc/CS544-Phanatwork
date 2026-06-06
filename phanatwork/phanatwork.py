@@ -21,6 +21,9 @@ def client_mode(args):
         "team": args.team,
         "role": desired_role,
         "message": args.message,
+        "username": args.username,
+        "password": args.password,
+        "action": action_from_string(args.action),
     }
     
     config = quic_engine.build_client_quic_config(cert_file)
@@ -36,6 +39,26 @@ def server_mode(args):
     server_config = quic_engine.build_server_quic_config(cert_file, key_file)
     asyncio.run(quic_engine.run_server(listen_address, listen_port, server_config))
 
+# helper function to convert the action string from the command line argument to the 
+# constant in the pdu file
+def action_from_string(action_name):
+    value = action_name.lower()
+    if value == "fastball":
+        return pdu.ACTION_PITCH_FASTBALL
+    if value == "curveball":
+        return pdu.ACTION_PITCH_CURVEBALL
+    if value == "changeup":
+        return pdu.ACTION_PITCH_CHANGEUP
+    if value == "swing":
+        return pdu.ACTION_BAT_SWING
+    if value == "take":
+        return pdu.ACTION_BAT_TAKE
+    if value == "bunt":
+        return pdu.ACTION_BAT_BUNT
+    return 0
+
+# helper function to convert the role string from the command line argument to the
+# constant in the pdu file
 def role_from_string(role_name):
     if role_name.lower() == "home":
         return pdu.ROLE_HOME
@@ -55,6 +78,9 @@ def parse_args():
     client_parser.add_argument('-t','--team', default='Team', help='Team name')
     client_parser.add_argument('-r','--role', default='either', choices=['home','away','either'], help='Requested role')
     client_parser.add_argument('-m','--message', default='This is a Phanatwork test message', help='Text message to send after START')
+    client_parser.add_argument('-u','--username', default='player', help='Username for AUTH')
+    client_parser.add_argument('--password', default='password', help='Password for AUTH')
+    client_parser.add_argument('-a','--action', default='auto', choices=['auto','fastball','curveball','changeup','swing','take','bunt'], help='PLAY_ACTION to send after GAME_UPDATE')
 
     server_parser = subparsers.add_parser('server')
     server_parser.add_argument('-c','--cert-file', default='./certs/quic_certificate.pem', help='Certificate file (for self signed certs)')

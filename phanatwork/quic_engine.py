@@ -2,7 +2,7 @@ import asyncio
 from aioquic.asyncio import connect, serve
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.events import StreamDataReceived
+from aioquic.quic.events import StreamDataReceived, ConnectionTerminated
 from typing import Optional, Dict, Callable, Coroutine, Deque, List
 from aioquic.tls import SessionTicket
 
@@ -19,6 +19,8 @@ ALPN_PROTOCOL = "phanatwork-protocol"
 # but modifeed to use Phanatwork connections and
 # to have a client scope passed in for the client protocol handler to use when 
 # launching the client protocol
+
+# Also now added cleanly handling a closed connection.
 
 def build_server_quic_config(cert_file, key_file) -> QuicConfiguration:
     configuration = QuicConfiguration(
@@ -68,7 +70,7 @@ class AsyncQuicServer(QuicConnectionProtocol):
                  )
         
     def remove_handler(self, stream_id):
-        self._handlers.pop(stream_id)
+        self._handlers.pop(stream_id, None)
         
     def _quic_client_event_dispatch(self, event):
         if isinstance(event, StreamDataReceived):
@@ -76,6 +78,14 @@ class AsyncQuicServer(QuicConnectionProtocol):
         
     def _quic_server_event_dispatch(self, event):
         handler = None
+        # updating to handle a closed connection
+        # we want to cleanly handle the case where the client closes the connection 
+        # without sending a close frame, which can happen if the client process is killed or crashes
+        if isinstance(event, ConnectionTerminated):
+            for handler in list(self._handlers.values()):
+                handler.connection_closed()
+            self._handlers.clear()
+            return
         if isinstance(event, StreamDataReceived):
             if event.stream_id not in self._handlers:
                  handler = PhanatworkServerRequestHandler(
@@ -95,6 +105,15 @@ class AsyncQuicServer(QuicConnectionProtocol):
                 handler.quic_event_received(event)
 
     def quic_event_received(self, event):
+         # updating to handle a closed connection
+        # we want to cleanly handle the case where the client closes the connection 
+        # without sending a close frame, which can happen if the client process is killed or crashes
+        if isinstance(event, ConnectionTerminated):
+            if self._mode == CLIENT_MODE and self._client_handler:
+                self._client_handler.connection_closed()
+            else:
+                self._quic_server_event_dispatch(event)
+            return
         if self._mode == SERVER_MODE:
             self._quic_server_event_dispatch(event)
         else:
@@ -164,6 +183,13 @@ class PhanatworkServerRequestHandler:
             QuicStreamEvent(event.stream_id, event.data, 
                             event.end_stream)
         )
+    # heloer function to close the connections
+    # when the client crashes
+    def connection_closed(self) -> None:
+        self.queue.put_nowait(
+            QuicStreamEvent(self.stream_id, b"", True)
+        )
+
     async def receive(self) -> QuicStreamEvent:
         queue_item = await self.queue.get()
         return queue_item

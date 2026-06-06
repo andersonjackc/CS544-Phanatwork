@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict
 
 import pdu
@@ -7,20 +7,19 @@ import pdu
 SendPdu = Callable[[pdu.Datagram], Awaitable[None]]
 
 # this controls the server state and DFA logic for protocol handling
-# currently minimal implementation with only enough to test basic
-# quic connection and message parsing, but will be expanded to have the 
-# full DFA states
+# currently minimal implementation with enough of the spec to test
+# setup, auth, joining, ready, action handling, and cleanup
 @dataclass
 class ClientSession:
     session_id: int
     send_pdu: SendPdu
     role: int = pdu.ROLE_NONE
     name: str = ""
+    username: str = ""
     team: str = ""
-    hello_done: bool = False
-    join_done: bool = False
+    players: list = field(default_factory=list)
+    setup_state: str = "SETUP_START"
     ready: bool = False
-    text_done: bool = False
     closed: bool = False
 
 
@@ -31,6 +30,11 @@ class PhanatworkServerState:
         self.clients: Dict[int, ClientSession] = {}
         self.role_to_session: Dict[int, int] = {}
         self.turn_id = 1
+        self.event_id = 1
+        self.main_state = "SETUP"
+        self.offense_role = pdu.ROLE_AWAY
+        self.defense_role = pdu.ROLE_HOME
+        self.actions: Dict[int, dict] = {}
 
     # on new client connection, register them and create a session for them,
     # returning the session object for use in the protocol handler loop
@@ -42,63 +46,101 @@ class PhanatworkServerState:
         print(f"[svr] registered session {session_id}")
         return session
 
-    # main server protocol handler, called from the server loop, 
+    # main server protocol handler, called from the server loop,
     # which dispatches to the appropriate handler function based on message type
     async def handle_pdu(self, session: ClientSession, datagram: pdu.Datagram):
         print(f"[svr] session {session.session_id} received {pdu.msg_type_name(datagram.mtype)}")
 
+        if datagram.mtype != pdu.MSG_TYPE_HELLO:
+            if datagram.session_id != session.session_id:
+                await self.send_error(session, pdu.ERR_INVALID_STATE, "Invalid session id")
+                return
+            if datagram.turn_id not in [0, self.turn_id]:
+                await self.send_error(session, pdu.ERR_STALE_TURN, "Stale turn id")
+                return
+
         if datagram.mtype == pdu.MSG_TYPE_HELLO:
             await self.handle_hello(session, datagram)
+        elif datagram.mtype == pdu.MSG_TYPE_AUTH:
+            await self.handle_auth(session, datagram)
         elif datagram.mtype == pdu.MSG_TYPE_JOIN:
             await self.handle_join(session, datagram)
         elif datagram.mtype == pdu.MSG_TYPE_READY:
             await self.handle_ready(session, datagram)
-        elif datagram.mtype == pdu.MSG_TYPE_ECHO:
-            await self.handle_echo(session, datagram)
+        elif datagram.mtype == pdu.MSG_TYPE_PLAY_ACTION:
+            await self.handle_play_action(session, datagram)
         elif datagram.mtype == pdu.MSG_TYPE_CLOSE:
-            await self.handle_close(session)
+            await self.handle_close(session, datagram)
         else:
-            await self.send_error(session, "Unexpected message type")
+            await self.send_error(session, pdu.ERR_INVALID_STATE, "Unexpected message type")
 
-    # the following are the individual message handlers for each message type, 
+    # the following are the individual message handlers for each message type,
     # which implement the protocol logic and state transitions
-    
-    # hello handler just checks for a name in the payload and responds with a HELLO_ACK
-    # need to add version checking and error handling for unsupported versions, 
-    # but this is just a basic implementation for testing
-    # TODO: add version checking and error handling for unsupported versions
+
+    # hello handler checks the requested version and responds with a HELLO_ACK
     async def handle_hello(self, session: ClientSession, datagram: pdu.Datagram):
-        session.name = datagram.payload.get("name", "player")
-        session.hello_done = True
+        if session.setup_state != "SETUP_START":
+            await self.send_error(session, pdu.ERR_INVALID_STATE, "HELLO received in invalid state")
+            return
+
+        requested_major = int(datagram.payload.get("requested_major", datagram.version_major))
+        requested_minor = int(datagram.payload.get("requested_minor", datagram.version_minor))
+        if requested_major != pdu.SUPPORTED_MAJOR:
+            await self.send_error(session, pdu.ERR_UNSUPPORTED_VERSION, "Unsupported protocol version")
+            return
+
+        session.name = datagram.payload.get("name", "player")[:32]
+        session.setup_state = "WAIT_AUTH"
+        accepted_minor = min(requested_minor, pdu.SUPPORTED_MINOR)
         await session.send_pdu(pdu.Datagram(
             pdu.MSG_TYPE_HELLO_ACK,
             "HELLO accepted",
             session_id=session.session_id,
             turn_id=self.turn_id,
-            payload={"accepted_major": 1, "accepted_minor": 0},
+            payload={"accepted_major": pdu.SUPPORTED_MAJOR, "accepted_minor": accepted_minor, "accepted_options": 0},
         ))
 
+    # auth handler currently just passes through the username and password and accepts any non-empty values,
+    # TODO: Implement a more "real" auth method with a user "database" (dict lookup for current purposes)
+    async def handle_auth(self, session: ClientSession, datagram: pdu.Datagram):
+        if session.setup_state != "WAIT_AUTH":
+            await self.send_error(session, pdu.ERR_INVALID_STATE, "AUTH received before HELLO")
+            return
 
-    # join handler checks that hello was done, 
+        username = datagram.payload.get("username", session.name)
+        password = datagram.payload.get("password", "")
+        if username == "" or password == "":
+            await self.send_error(session, pdu.ERR_AUTH_FAILED, "AUTH failed")
+            return
+
+        session.username = username[:32]
+        session.setup_state = "WAIT_JOIN"
+        await session.send_pdu(pdu.Datagram(
+            pdu.MSG_TYPE_AUTH_RESULT,
+            "Login accepted",
+            session_id=session.session_id,
+            turn_id=self.turn_id,
+            payload={"status": pdu.STATUS_SUCCESS, "message": "Login accepted"},
+        ))
+
     # then assigns a role based on the requested role and availability,
     # and responds with a JOIN_ACK with the assigned role, or an error
-    # TODO: need to update main Datagram packing to be more consistent
-    # with spec, currently just keeping very similar to the echo example
     async def handle_join(self, session: ClientSession, datagram: pdu.Datagram):
-        if not session.hello_done:
-            await self.send_error(session, "JOIN received before HELLO")
+        if session.setup_state != "WAIT_JOIN":
+            await self.send_error(session, pdu.ERR_INVALID_STATE, "JOIN received before AUTH")
             return
 
         requested_role = int(datagram.payload.get("requested_role", pdu.ROLE_NONE))
         assigned_role = self.assign_role(requested_role)
 
         if assigned_role == pdu.ROLE_NONE:
-            await self.send_error(session, "No role available")
+            await self.send_error(session, pdu.ERR_INVALID_ROLE, "No role available")
             return
 
         session.role = assigned_role
-        session.team = datagram.payload.get("team", "Team")
-        session.join_done = True
+        session.team = datagram.payload.get("team", "Team")[:32]
+        session.players = datagram.payload.get("players", [])[:26]
+        session.setup_state = "SETUP_COMPLETE"
         self.role_to_session[assigned_role] = session.session_id
 
         await session.send_pdu(pdu.Datagram(
@@ -107,85 +149,151 @@ class PhanatworkServerState:
             session_id=session.session_id,
             turn_id=self.turn_id,
             role=assigned_role,
-            payload={"assigned_role": assigned_role},
+            payload={"status": pdu.STATUS_SUCCESS, "assigned_role": assigned_role, "message": "Joined"},
         ))
-    
+
+        if self.both_clients_joined():
+            self.main_state = "WAIT_READY"
+            await self.broadcast_roster_update()
+
     # ready handler checks that join was done, then marks the session as ready,
     # and if both clients are ready, broadcasts a GAME_UPDATE to both clients to start the
     async def handle_ready(self, session: ClientSession, datagram: pdu.Datagram):
-        if not session.join_done:
-            await self.send_error(session, "READY received before JOIN")
+        if self.main_state != "WAIT_READY" or session.setup_state != "SETUP_COMPLETE":
+            await self.send_error(session, pdu.ERR_INVALID_STATE, "READY received before both clients joined")
             return
 
-        session.ready = True
+        session.ready = bool(datagram.payload.get("ready", True))
         print(f"[svr] session {session.session_id} is READY")
 
         if self.both_clients_ready():
-            await self.broadcast_game_update()
+            self.main_state = "WAIT_BOTH_ACTIONS"
+            await self.broadcast_game_update("Both clients are ready. Send PLAY_ACTION.", 0)
 
-    # dummy message type for ECHO testing, not part of actual protcol
-    # TODO: replace with real msg types
-    async def handle_echo(self, session: ClientSession, datagram: pdu.Datagram):
-        if not self.both_clients_ready():
-            await self.send_error(session, "ECHO received before both clients are ready")
+    # play action handler checks that the message is valid for the current state and role,
+    # then stores the action and responds with an ACTION_ACK, and if both clients have sent
+    # their actions, resolves the turn and broadcasts a GAME_UPDATE with the result
+    async def handle_play_action(self, session: ClientSession, datagram: pdu.Datagram):
+        if self.main_state not in ["WAIT_BOTH_ACTIONS", "WAIT_OFFENSE", "WAIT_DEFENSE"]:
+            await self.send_error(session, pdu.ERR_INVALID_STATE, "PLAY_ACTION received in invalid state")
+            return
+        if session.role not in [self.offense_role, self.defense_role]:
+            await self.send_error(session, pdu.ERR_INVALID_ROLE, "Role is not active for this turn")
+            return
+        if session.role in self.actions:
+            await self.send_error(session, pdu.ERR_DUPLICATE_ACTION, "Duplicate action for this turn")
             return
 
-        session.text_done = True
+        action_type = int(datagram.payload.get("action_type", 0))
+        if not self.action_valid_for_role(session.role, action_type):
+            await self.send_error(session, pdu.ERR_INVALID_ROLE, "Action is not valid for this role")
+            return
+
+        self.actions[session.role] = datagram.payload
         await session.send_pdu(pdu.Datagram(
-            pdu.MSG_TYPE_ECHO_ACK,
-            "SVR-ACK: " + datagram.msg,
+            pdu.MSG_TYPE_ACTION_ACK,
+            "ACTION accepted",
             session_id=session.session_id,
             turn_id=self.turn_id,
             role=session.role,
+            payload={"status": pdu.STATUS_SUCCESS},
         ))
-        print(f"[svr] {pdu.role_name(session.role)} message: {datagram.msg}")
 
-    # close handler just marks the session as closed, 
-    # in a real implementation would also need to clean up state and 
-    # notify the other client if one client disconnects
-    # TODO: add cleanup and notification logic for client disconnects
-    async def handle_close(self, session: ClientSession):
+        if self.offense_role in self.actions and self.defense_role in self.actions:
+            self.main_state = "RESOLVE_TURN"
+            await self.resolve_turn()
+        elif session.role == self.offense_role:
+            self.main_state = "WAIT_DEFENSE"
+        else:
+            self.main_state = "WAIT_OFFENSE"
+
+    # close handler marks the session as closed and frees the assigned role
+    async def handle_close(self, session: ClientSession, datagram: pdu.Datagram = None):
         session.closed = True
+        self.cleanup_session(session)
         print(f"[svr] session {session.session_id} closed")
 
-    # error handler just sends an ERROR message back to the client with the error text
-    # need to add more error handling and checking in the individual message handlers,
-    # as well as tie in error codes from spec
-    # TODO: add more error handling s well as tie in error codes from spec
-    async def send_error(self, session: ClientSession, text: str):
+    # error handler sends an ERROR message back to the client with a spec error code
+    async def send_error(self, session: ClientSession, error_code:int, text: str):
         await session.send_pdu(pdu.Datagram(
             pdu.MSG_TYPE_ERROR,
             text,
             session_id=session.session_id,
             turn_id=self.turn_id,
             role=session.role,
+            payload={"error_code": error_code, "error_text": text},
         ))
 
-    # once both clients are ready, broadcast a GAME_UPDATE message to both clients to
-    # start the game, currently just sends a message with the client and opponent info, 
-    # but will need to be expanded
-    # TODO: expand the GAME_UPDATE message to include the actual game state and 
-    # logic for turns, actions, etc.
-    async def broadcast_game_update(self):
+    # broadcast a roster update to both clients when they have both joined, with their opponent's info
+    async def broadcast_roster_update(self):
         home = self.clients[self.role_to_session[pdu.ROLE_HOME]]
         away = self.clients[self.role_to_session[pdu.ROLE_AWAY]]
-        print("[svr] both clients ready; sending GAME_UPDATE")
+        print("[svr] both clients joined; sending ROSTER_UPDATE")
 
         for session in [home, away]:
             opponent = away if session.role == pdu.ROLE_HOME else home
             await session.send_pdu(pdu.Datagram(
-                pdu.MSG_TYPE_GAME_UPDATE,
-                "Both clients are ready. You may send ECHO.",
+                pdu.MSG_TYPE_ROSTER_UPDATE,
+                "Opponent roster update",
                 session_id=session.session_id,
                 turn_id=self.turn_id,
                 role=session.role,
                 payload={
-                    "your_role": session.role,
-                    "your_team": session.team,
+                    "team": opponent.team,
+                    "player_count": len(opponent.players),
+                    "players": opponent.players,
                     "opponent_role": opponent.role,
-                    "opponent_team": opponent.team,
                 },
             ))
+
+    # sends current game state to both clients
+    async def broadcast_game_update(self, result_text:str, result_code:int):
+        home = self.clients.get(self.role_to_session.get(pdu.ROLE_HOME))
+        away = self.clients.get(self.role_to_session.get(pdu.ROLE_AWAY))
+        if not home or not away:
+            return
+
+        # send a game update to both clients with the current game state and the result of the last turn resolution
+        # TODO: Currently hardcoded values for the game state but this will 
+        # be tied into the actual game logic once it is implemented.
+        print("[svr] sending GAME_UPDATE")
+        for session in [home, away]:
+            await session.send_pdu(pdu.Datagram(
+                pdu.MSG_TYPE_GAME_UPDATE,
+                result_text,
+                session_id=session.session_id,
+                turn_id=self.turn_id,
+                role=session.role,
+                payload={
+                    "event_id": self.event_id,
+                    "inning": 1,
+                    "half_inning": 0,
+                    "outs": 0,
+                    "balls": 0,
+                    "strikes": 0,
+                    "bases": 0,
+                    "offense_role": self.offense_role,
+                    "defense_role": self.defense_role,
+                    "home_score": 0,
+                    "away_score": 0,
+                    "result_code": result_code,
+                    "result_text": result_text,
+                },
+            ))
+
+    # resolves the turn based on the stored offense and defense actions, then clears the actions and increments the turn and event ids
+    # TODO: Tie into a more realistic game logic resolution
+    # This should be passed to the protocol from the application utilizing Phanatwork
+    # not within the protocol itself
+    async def resolve_turn(self):
+        offense_action = self.actions.get(self.offense_role, {})
+        defense_action = self.actions.get(self.defense_role, {})
+        result_text = f"Resolved turn: offense={offense_action.get('action_type')} defense={defense_action.get('action_type')}"
+        self.actions.clear()
+        self.turn_id += 1
+        self.event_id += 1
+        self.main_state = "WAIT_BOTH_ACTIONS"
+        await self.broadcast_game_update(result_text, 0)
 
     # simple role assignment logic based on requested role and availability
     def assign_role(self, requested_role:int):
@@ -199,11 +307,43 @@ class PhanatworkServerState:
             return pdu.ROLE_AWAY
         return pdu.ROLE_NONE
 
+    # helper function to check if the action is valid for the current role
+    def action_valid_for_role(self, role:int, action_type:int):
+        if role == self.offense_role:
+            return action_type in pdu.OFFENSE_ACTIONS
+        if role == self.defense_role:
+            return action_type in pdu.DEFENSE_ACTIONS
+        return False
+
+    # once a CLEAN message is received or a client disconnects, this function cleans up the session and 
+    # frees the role for another client to join
+    def cleanup_session(self, session: ClientSession):
+        if self.role_to_session.get(session.role) == session.session_id:
+            self.role_to_session.pop(session.role)
+        self.actions.pop(session.role, None)
+        self.clients.pop(session.session_id, None)
+        session.role = pdu.ROLE_NONE
+        session.ready = False
+        if not self.role_to_session:
+            self.reset_match_state()
+    
+    # resets the match state to the initial values,
+    # ready for a new match to be set up once both clients have left or sent CLEAN
+    def reset_match_state(self):
+        self.turn_id = 1
+        self.event_id = 1
+        self.main_state = "SETUP"
+        self.offense_role = pdu.ROLE_AWAY
+        self.defense_role = pdu.ROLE_HOME
+        self.actions.clear()
+
+    # helper function to check if both clients have joined
+    def both_clients_joined(self):
+        return pdu.ROLE_HOME in self.role_to_session and pdu.ROLE_AWAY in self.role_to_session
+
     # helper function to check if both clients are ready
     def both_clients_ready(self):
-        if pdu.ROLE_HOME not in self.role_to_session:
-            return False
-        if pdu.ROLE_AWAY not in self.role_to_session:
+        if not self.both_clients_joined():
             return False
         home = self.clients[self.role_to_session[pdu.ROLE_HOME]]
         away = self.clients[self.role_to_session[pdu.ROLE_AWAY]]
