@@ -1,0 +1,3 @@
+Things I need to update:
+Timeout needs to be longer than 1 minute
+Need to send a GAME_UPDATE after both clients ready

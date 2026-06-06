@@ -247,7 +247,7 @@ class PhanatworkServerState:
             ))
 
     # sends current game state to both clients
-    async def broadcast_game_update(self, result_text:str, result_code:int):
+    async def broadcast_game_update(self, result_text:str, result_code:int, batter_id:int = 1, pitcher_id:int = 3):
         home = self.clients.get(self.role_to_session.get(pdu.ROLE_HOME))
         away = self.clients.get(self.role_to_session.get(pdu.ROLE_AWAY))
         if not home or not away:
@@ -266,6 +266,8 @@ class PhanatworkServerState:
                 role=session.role,
                 payload={
                     "event_id": self.event_id,
+                    "batter_id": batter_id,
+                    "pitcher_id": pitcher_id,
                     "inning": 1,
                     "half_inning": 0,
                     "outs": 0,
@@ -275,7 +277,11 @@ class PhanatworkServerState:
                     "offense_role": self.offense_role,
                     "defense_role": self.defense_role,
                     "home_score": 0,
+                    "home_hits": 0,
+                    "home_errors": 0,
                     "away_score": 0,
+                    "away_hits": 0,
+                    "away_errors": 0,
                     "result_code": result_code,
                     "result_text": result_text,
                 },
@@ -288,12 +294,14 @@ class PhanatworkServerState:
     async def resolve_turn(self):
         offense_action = self.actions.get(self.offense_role, {})
         defense_action = self.actions.get(self.defense_role, {})
+        batter_id = int(offense_action.get('player_id', 1))
+        pitcher_id = int(defense_action.get('player_id', 3))
         result_text = f"Resolved turn: offense={offense_action.get('action_type')} defense={defense_action.get('action_type')}"
         self.actions.clear()
         self.turn_id += 1
         self.event_id += 1
         self.main_state = "WAIT_BOTH_ACTIONS"
-        await self.broadcast_game_update(result_text, 0)
+        await self.broadcast_game_update(result_text, 0, batter_id, pitcher_id)
 
     # simple role assignment logic based on requested role and availability
     def assign_role(self, requested_role:int):

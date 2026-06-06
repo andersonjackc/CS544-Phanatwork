@@ -24,6 +24,7 @@ def client_mode(args):
         "username": args.username,
         "password": args.password,
         "action": action_from_string(args.action),
+        "turns": args.turns,
     }
     
     config = quic_engine.build_client_quic_config(cert_file)
@@ -81,6 +82,7 @@ def parse_args():
     client_parser.add_argument('-u','--username', default='player', help='Username for AUTH')
     client_parser.add_argument('--password', default='password', help='Password for AUTH')
     client_parser.add_argument('-a','--action', default='auto', choices=['auto','fastball','curveball','changeup','swing','take','bunt'], help='PLAY_ACTION to send after GAME_UPDATE')
+    client_parser.add_argument('--turns', type=int, default=3, help='Number of dummy turns to play before CLOSE')
 
     server_parser = subparsers.add_parser('server')
     server_parser.add_argument('-c','--cert-file', default='./certs/quic_certificate.pem', help='Certificate file (for self signed certs)')
