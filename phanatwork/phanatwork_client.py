@@ -1,15 +1,17 @@
-from typing import Dict
+from typing import Dict, Optional
 import json
 from phanatwork_quic import PhanatworkQuicConnection, QuicStreamEvent
 import pdu
+
+# currently setting both error and close to make the client stop
+# TODO: Need to consider how to handle errors that are recoverable
+TERMINAL_MESSAGE_TYPES = {pdu.MSG_TYPE_ERROR, pdu.MSG_TYPE_CLOSE}
 
 
 # main client protocol setup
 # Goes through HELLO, AUTH, JOIN, ROSTER_UPDATE, READY, GAME_UPDATE,
 # PLAY_ACTION, and CLOSE.
 async def phanatwork_client_proto(scope:Dict, conn:PhanatworkQuicConnection):
-
-    #START CLIENT HERE
     print('[cli] starting Phanatwork client')
     name = scope.get('name', 'Player')
     team = scope.get('team', 'Team')
@@ -19,128 +21,144 @@ async def phanatwork_client_proto(scope:Dict, conn:PhanatworkQuicConnection):
     action = scope.get('action', 0)
     turns = scope.get('turns', 1)
 
-    new_stream_id = conn.new_stream()
+    stream_id = conn.new_stream()
+    # session_id = 0
+    # turn_id = 0
+    # assigned_role=pdu.ROLE_NONE
 
-    datagram = pdu.Datagram(
-        pdu.MSG_TYPE_HELLO,
-        "HELLO",
-        payload={"name": name, "requested_major": 1, "requested_minor": 0, "option_flags": 0},
+    # SETUP: HELLO -> HELLO_ACK
+    response = await send_and_receive(
+        conn,
+        stream_id,
+        pdu.Datagram(
+            pdu.MSG_TYPE_HELLO,
+            "HELLO",
+            payload={"name": name, "requested_major": 1, "requested_minor": 0, "option_flags": 0},
+        ),
     )
-    await send_datagram(conn, new_stream_id, datagram)
-    dgram_resp = await receive_datagram(conn)
-    print('[cli] got message: ', dgram_resp.msg)
-    if dgram_resp.mtype == pdu.MSG_TYPE_ERROR or dgram_resp.mtype == pdu.MSG_TYPE_CLOSE:
+    if is_terminal(response):
+        return
+    session_id = response.session_id
+    turn_id = response.turn_id
+
+    # AUTH -> AUTH_RESULT
+    response = await send_and_receive(
+        conn,
+        stream_id,
+        pdu.Datagram(
+            pdu.MSG_TYPE_AUTH,
+            "AUTH",
+            session_id=session_id,
+            turn_id=turn_id,
+            payload={"username": username, "password": password},
+        ),
+    )
+    if is_terminal(response):
         return
 
-    session_id = dgram_resp.session_id
-    turn_id = dgram_resp.turn_id
-
-    datagram = pdu.Datagram(
-        pdu.MSG_TYPE_AUTH,
-        "AUTH",
-        session_id=session_id,
-        turn_id=turn_id,
-        payload={"username": username, "password": password},
+    # JOIN -> JOIN_ACK
+    response = await send_and_receive(
+        conn,
+        stream_id,
+        pdu.Datagram(
+            pdu.MSG_TYPE_JOIN,
+            "JOIN",
+            session_id=session_id,
+            turn_id=turn_id,
+            payload={"team": team, "requested_role": role, "players": default_players(team)},
+        ),
     )
-    await send_datagram(conn, new_stream_id, datagram)
-    dgram_resp = await receive_datagram(conn)
-    print('[cli] got message: ', dgram_resp.msg)
-    if dgram_resp.mtype == pdu.MSG_TYPE_ERROR or dgram_resp.mtype == pdu.MSG_TYPE_CLOSE: 
+    if is_terminal(response):
         return
 
-    datagram = pdu.Datagram(
-        pdu.MSG_TYPE_JOIN,
-        "JOIN",
-        session_id=session_id,
-        turn_id=turn_id,
-        payload={"team": team, "requested_role": role, "players": default_players(team)},
-    )
-    await send_datagram(conn, new_stream_id, datagram)
-    dgram_resp = await receive_datagram(conn)
-    print('[cli] got message: ', dgram_resp.msg)
-    if dgram_resp.mtype == pdu.MSG_TYPE_ERROR or dgram_resp.mtype == pdu.MSG_TYPE_CLOSE:
+    assigned_role = response.payload.get('assigned_role', pdu.ROLE_NONE)
+    session_id = response.session_id
+    turn_id = response.turn_id
+
+    # Wait for the opponent roster. This only arrives after both clients join.
+    roster_update = await wait_for(conn, pdu.MSG_TYPE_ROSTER_UPDATE)
+    if is_terminal(roster_update):
         return
 
-    assigned_role = dgram_resp.payload.get('assigned_role', pdu.ROLE_NONE)
-    session_id = dgram_resp.session_id
-    turn_id = dgram_resp.turn_id
-
-    print('[cli] waiting for ROSTER_UPDATE')
-    dgram_resp = await receive_until(conn, pdu.MSG_TYPE_ROSTER_UPDATE)
-    print('[cli] got message: ', dgram_resp.msg)
-    print('[cli] msg as json: ', dgram_resp.to_json())
-    if dgram_resp.mtype == pdu.MSG_TYPE_ERROR or dgram_resp.mtype == pdu.MSG_TYPE_CLOSE:
-        return
-
-    datagram = pdu.Datagram(
-        pdu.MSG_TYPE_READY,
-        "READY",
-        session_id=session_id,
-        turn_id=turn_id,
-        role=assigned_role,
-        payload={"ready": True},
+    await send_datagram(
+        conn,
+        stream_id,
+        pdu.Datagram(
+            pdu.MSG_TYPE_READY,
+            "READY",
+            session_id=session_id,
+            turn_id=turn_id,
+            role=assigned_role,
+            payload={"ready": True},
+        ),
     )
-    await send_datagram(conn, new_stream_id, datagram)
-
     # inital game update 
     # this currently doesnt match the DFA
     # TODO: Need to note in the README or Update the DFA to reflect that
     # after both clients send READY, the server will send an initial GAME_UPDATE to both clients with the 
     # starting game state, and then the turn_id will increment from there for each turn,
-    print('[cli] waiting for GAME_UPDATE')
-    dgram_resp = await receive_until(conn, pdu.MSG_TYPE_GAME_UPDATE)
-    print('[cli] got message: ', dgram_resp.msg)
-    print('[cli] msg as json: ', dgram_resp.to_json())
-    if dgram_resp.mtype == pdu.MSG_TYPE_ERROR or dgram_resp.mtype == pdu.MSG_TYPE_CLOSE:
+    game_update = await wait_for(conn, pdu.MSG_TYPE_GAME_UPDATE)
+    if is_terminal(game_update):
         return
 
     completed_turns = 0
     while completed_turns < turns:
-        turn_id = dgram_resp.turn_id
-        selected_action = select_action(assigned_role, dgram_resp.payload, action)
-        selected_player = select_player(assigned_role, dgram_resp.payload)
+        turn_id = game_update.turn_id
+        selected_action = select_action(assigned_role, game_update.payload, action)
+        selected_player = select_player(assigned_role, game_update.payload)
 
-        datagram = pdu.Datagram(
-            pdu.MSG_TYPE_PLAY_ACTION,
-            "PLAY_ACTION",
+        response = await send_and_receive(
+            conn,
+            stream_id,
+            pdu.Datagram(
+                pdu.MSG_TYPE_PLAY_ACTION,
+                "PLAY_ACTION",
+                session_id=session_id,
+                turn_id=turn_id,
+                role=assigned_role,
+                payload={"action_type": selected_action, "player_id": selected_player},
+            ),
+        )
+        if is_terminal(response):
+            return
+
+        if response.mtype != pdu.MSG_TYPE_ACTION_ACK:
+            print('[cli] expected ACTION_ACK but received:')
+            print(format_datagram(response))
+            return
+
+        game_update = await wait_for(conn, pdu.MSG_TYPE_GAME_UPDATE, label='resolved GAME_UPDATE')
+        if is_terminal(game_update):
+            return
+        completed_turns += 1
+
+    await send_datagram(
+        conn,
+        stream_id,
+        pdu.Datagram(
+            pdu.MSG_TYPE_CLOSE,
+            "CLOSE",
             session_id=session_id,
             turn_id=turn_id,
             role=assigned_role,
-            payload={"action_type": selected_action, "player_id": selected_player},
-        )
-        await send_datagram(conn, new_stream_id, datagram)
-        dgram_resp = await receive_datagram(conn)
-        print('[cli] got message: ', dgram_resp.msg)
-        print('[cli] msg as json: ', dgram_resp.to_json())
-        if dgram_resp.mtype == pdu.MSG_TYPE_ERROR or dgram_resp.mtype == pdu.MSG_TYPE_CLOSE:
-            return
-
-        if dgram_resp.mtype == pdu.MSG_TYPE_ACTION_ACK:
-            print('[cli] waiting for resolved GAME_UPDATE')
-            dgram_resp = await receive_until(conn, pdu.MSG_TYPE_GAME_UPDATE)
-            print('[cli] got message: ', dgram_resp.msg)
-            print('[cli] msg as json: ', dgram_resp.to_json())
-            if dgram_resp.mtype == pdu.MSG_TYPE_ERROR or dgram_resp.mtype == pdu.MSG_TYPE_CLOSE:
-                return
-            turn_id = dgram_resp.turn_id
-            completed_turns += 1
-
-    datagram = pdu.Datagram(
-        pdu.MSG_TYPE_CLOSE,
-        "CLOSE",
-        session_id=session_id,
-        turn_id=turn_id,
-        role=assigned_role,
-        payload={"close_reason": pdu.CLOSE_NORMAL, "close_text": "Client complete"},
+            payload={"close_reason": pdu.CLOSE_NORMAL, "close_text": "Client complete"},
+        ),
+        end_stream=True,
     )
-    await send_datagram(conn, new_stream_id, datagram, True)
-    #END CLIENT HERE
 
 
 # helper function to send a datagram on the selected QUIC stream
 async def send_datagram(conn:PhanatworkQuicConnection, stream_id:int, datagram:pdu.Datagram, end_stream:bool = False):
     qs = QuicStreamEvent(stream_id, datagram.to_bytes(), end_stream)
     await conn.send(qs)
+
+# helper function to send a datagram and wait for a response
+async def send_and_receive(conn: PhanatworkQuicConnection, stream_id: int, datagram: pdu.Datagram):
+    await send_datagram(conn, stream_id, datagram)
+    response = await receive_datagram(conn)
+    print_received(response)
+    return response
+
 
 # helper functin to receive a datagram and handle an error by 
 # updating the datagram to be an error datagram instead of raising an exception
@@ -169,18 +187,43 @@ async def receive_datagram(conn:PhanatworkQuicConnection):
             payload={"error_code": exc.code, "error_text": exc.text},
         )
 
-# helper function to continuously receive datagrams until one with the expected type is received,
-# or an error or close message as well.
-# It will print out any other received datagrams along the way
-# This should never really occur but we dont want to ignore an unexpected datagram, and it 
-# is  useful for debugging to see if we get any unexpected messages before the one we are waiting for
-async def receive_until(conn:PhanatworkQuicConnection, expected_type:int):
+# replaces receive_until to be more general
+async def wait_for(conn: PhanatworkQuicConnection, expected_type: int, label: Optional[str] = None):
+    expected_name = label or pdu.msg_type_name(expected_type)
+    print(f'[cli] waiting for {expected_name}')
+
     while True:
         datagram = await receive_datagram(conn)
+        print_received(datagram)
         if datagram.mtype in [expected_type, pdu.MSG_TYPE_ERROR, pdu.MSG_TYPE_CLOSE]:
             return datagram
-        print('[cli] got unexpected message: ', datagram.msg)
-        print('[cli] msg as json: ', datagram.to_json())
+        print('[cli] unexpected message while waiting; continuing')
+
+# helper function to check if a recieved datagram should kill the client
+def is_terminal(datagram: pdu.Datagram):
+    if datagram.mtype in TERMINAL_MESSAGE_TYPES:
+        print('[cli] stopping client protocol because the peer sent a terminal message')
+        return True
+    return False
+
+# helper function to pretty print a datagram payload for easier debugging
+def print_received(datagram: pdu.Datagram):
+    print(f'[cli] got {pdu.msg_type_name(datagram.mtype)}: {datagram.msg}')
+    if datagram.payload:
+        print(format_datagram(datagram))
+
+# formatting a datagram for prettier prenting
+def format_datagram(datagram: pdu.Datagram):
+    visible = {
+        "version": f"{datagram.version_major}.{datagram.version_minor}",
+        "type": pdu.msg_type_name(datagram.mtype),
+        "session_id": datagram.session_id,
+        "turn_id": datagram.turn_id,
+        "role": pdu.role_name(datagram.role),
+        "message": datagram.msg,
+        "payload": datagram.payload,
+    }
+    return json.dumps(visible, indent=2, sort_keys=True)
 
 
 # helper function to select a legal dummy action based on the role assigned by the server
