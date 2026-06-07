@@ -10,7 +10,7 @@ import pdu
 import phanatwork_server
 from phanatwork_quic import PhanatworkQuicConnection, QuicStreamEvent
 from phanatwork_state import PhanatworkServerState
-from baseball_simulator.simple_baseball import OneOutBaseballRules
+from baseball_simulator.simple_baseball import OneOutBaseballRules, SimpleBaseballRules, AlwaysOutOneOutRules
 from phanatwork_client import default_players
 
 # abstrac test case results for easy reporting and debugging
@@ -110,7 +110,7 @@ async def send_action(state, peer, action_type, player_id=1, turn_id=None):
 # helper function to setup the server and
 # get it to a state where two clients have joined and the match is ready to start, 
 async def setup_joined_match():
-    state = PhanatworkServerState()
+    state = PhanatworkServerState(log_protocol=False)
     home = await make_peer(state)
     away = await make_peer(state)
 
@@ -174,7 +174,7 @@ def assert_contains_type(peer: TestPeer, expected_type: int):
 # test that the server properly goes through HELLO -> AUTH -> JOIN with valid inputs, 
 # and that the assigned role is correct based on the requested role and server state
 async def test_valid_hello_auth_join_sequence():
-    state = PhanatworkServerState()
+    state = PhanatworkServerState(log_protocol=False)
     peer = await make_peer(state)
 
     await send_hello(state, peer, "Solo")
@@ -239,7 +239,7 @@ async def test_valid_complete_turn_resolves_and_increments_turn():
 
 # verify that the server can use a different injected game rule set without changing the protocol handler
 async def test_valid_injected_one_out_rules_advance_half_inning():
-    state = PhanatworkServerState(OneOutBaseballRules(innings=2, seed=7))
+    state = PhanatworkServerState(AlwaysOutOneOutRules(innings=2), log_protocol=False)
     home = await make_peer(state)
     away = await make_peer(state)
 
@@ -264,6 +264,19 @@ async def test_valid_injected_one_out_rules_advance_half_inning():
     assert game_update.payload.get("half_inning") == 1
     assert game_update.payload.get("offense_role") == pdu.ROLE_HOME
     assert game_update.payload.get("defense_role") == pdu.ROLE_AWAY
+
+
+# verify that auth now rejects a known user with the wrong password
+async def test_auth_wrong_password_is_rejected():
+    state = PhanatworkServerState(log_protocol=False)
+    peer = await make_peer(state)
+
+    await send_hello(state, peer, "Bad Login")
+    peer.sent.clear()
+    await send_auth(state, peer, "home", "wrong-password")
+
+    assert_error(peer, pdu.ERR_AUTH_FAILED)
+    assert peer.session.setup_state == "WAIT_AUTH"
 
 # verify that a client cannot send a protocol CLOSE, because CLOSE is server initiated only
 # adding this as I initially, incorrectly, had the client be able to send it, which does not match the DFA
@@ -301,14 +314,14 @@ async def test_transport_disconnect_notifies_opponent_with_server_close():
 
 # test AUTH before HELLO
 async def test_auth_before_hello():
-    state = PhanatworkServerState()
+    state = PhanatworkServerState(log_protocol=False)
     peer = await make_peer(state)
     await send_auth(state, peer)
     assert_error(peer, pdu.ERR_INVALID_STATE)
 
 # test JOIN before AUTH
 async def test_join_before_auth():
-    state = PhanatworkServerState()
+    state = PhanatworkServerState(log_protocol=False)
     peer = await make_peer(state)
     await send_hello(state, peer)
     peer.sent.clear()
@@ -317,7 +330,7 @@ async def test_join_before_auth():
 
 # test READY before both clients have joined and the server is in the WAIT_READY state
 async def test_ready_before_both_joined():
-    state = PhanatworkServerState()
+    state = PhanatworkServerState(log_protocol=False)
     peer = await make_peer(state)
     await send_hello(state, peer)
     await send_auth(state, peer)
@@ -371,7 +384,7 @@ async def run_server_bytes(raw_bytes):
         QuicStreamEvent(stream_id, b"", True),
     ])
     old_state = phanatwork_server.SERVER_STATE
-    phanatwork_server.SERVER_STATE = PhanatworkServerState()
+    phanatwork_server.SERVER_STATE = PhanatworkServerState(log_protocol=False)
     try:
         await phanatwork_server.phanatwork_server_proto({"stream_id": stream_id}, PhanatworkQuicConnection(
             fake.send,
@@ -507,6 +520,7 @@ TESTS = [
     ("DFA passing cases", "Transport disconnect notifies opponent with server CLOSE", test_transport_disconnect_notifies_opponent_with_server_close),
 
     ("DFA validation errors", "AUTH before HELLO is rejected", test_auth_before_hello),
+    ("DFA validation errors", "Wrong password is rejected", test_auth_wrong_password_is_rejected),
     ("DFA validation errors", "JOIN before AUTH is rejected", test_join_before_auth),
     ("DFA validation errors", "READY before both clients joined is rejected", test_ready_before_both_joined),
     ("DFA validation errors", "PLAY_ACTION before READY is rejected", test_play_action_before_ready),

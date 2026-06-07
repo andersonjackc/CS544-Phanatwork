@@ -1,0 +1,24 @@
+{
+  "server": "localhost",
+  "port": 4433,
+  "name": "Mr. Met",
+  "username": "home",
+  "password": "password",
+  "team": "Mets",
+  "role": "away",
+  "play_mode": "auto",
+  "auto_delay": 0.5,
+  "turns": 9999,
+  "players": [
+    {"player_id": 0, "player_name": "Freddy Peralta", "lineup_slot": 0, "position": "pitcher", "player_status": "active", "stats": [{"stat_id": "era_x100", "scale": 2, "stat_value": 325}]},
+    {"player_id": 1, "player_name": "Francisco Alvarez", "lineup_slot": 1, "position": "catcher", "player_status": "active", "stats": [{"stat_id": "batting_avg_x1000", "scale": 3, "stat_value": 245}]},
+    {"player_id": 2, "player_name": "Jorge Polanco", "lineup_slot": 2, "position": "first_base", "player_status": "active"},
+    {"player_id": 3, "player_name": "Marcus Semien", "lineup_slot": 3, "position": "second_base", "player_status": "active"},
+    {"player_id": 4, "player_name": "Francisco Lindor", "lineup_slot": 4, "position": "shortstop", "player_status": "active"},
+    {"player_id": 5, "player_name": "Brett Baty", "lineup_slot": 5, "position": "third_base", "player_status": "active"},
+    {"player_id": 6, "player_name": "Juan Soto", "lineup_slot": 6, "position": "right_field", "player_status": "active"},
+    {"player_id": 7, "player_name": "Brandon Nimmo", "lineup_slot": 7, "position": "center_field", "player_status": "active"},
+    {"player_id": 8, "player_name": "Jared Young", "lineup_slot": 8, "position": "left_field", "player_status": "active"},
+    {"player_id": 9, "player_name": "Mark Vientos", "lineup_slot": 9, "position": "designated_hitter", "player_status": "active"}
+  ]
+}

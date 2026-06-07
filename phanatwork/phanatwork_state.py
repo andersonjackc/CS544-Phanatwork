@@ -5,6 +5,13 @@ import pdu
 from baseball_simulator.simple_baseball import SimpleBaseballRules
 
 
+PASSWORD_DB = {
+    "home": "password",
+    "away": "password",
+    "player": "password",
+    "solo": "password",
+}
+
 SendPdu = Callable[[pdu.Datagram], Awaitable[None]]
 
 # this controls the server state and DFA logic for protocol handling
@@ -104,8 +111,8 @@ class PhanatworkServerState:
             payload={"accepted_major": pdu.SUPPORTED_MAJOR, "accepted_minor": accepted_minor, "accepted_options": 0},
         ))
 
-    # auth handler currently just passes through the username and password and accepts any non-empty values,
-    # TODO: Implement a more "real" auth method with a user "database" (dict lookup for current purposes)
+    # auth handler checks against a small in-memory password database.
+    # still intentionally simple for the project, but it is no longer pass-through auth.
     async def handle_auth(self, session: ClientSession, datagram: pdu.Datagram):
         if session.setup_state != "WAIT_AUTH":
             await self.send_error(session, pdu.ERR_INVALID_STATE, "AUTH received before HELLO")
@@ -113,8 +120,8 @@ class PhanatworkServerState:
 
         username = datagram.payload.get("username", session.name)
         password = datagram.payload.get("password", "")
-        if username == "" or password == "":
-            await self.send_error(session, pdu.ERR_AUTH_FAILED, "AUTH failed")
+        if PASSWORD_DB.get(username) != password:
+            await self.send_error(session, pdu.ERR_AUTH_FAILED, "Login failed! Username or Password incorrect.")
             return
 
         session.username = username[:32]
@@ -173,7 +180,8 @@ class PhanatworkServerState:
 
         if self.both_clients_ready():
             self.main_state = "WAIT_BOTH_ACTIONS"
-            await self.broadcast_game_update("Both clients are ready. Send PLAY_ACTION.", 0)
+            self.set_starting_matchups()
+            await self.broadcast_game_update(self.ready_text(), 0)
 
     # play action handler checks that the message is valid for the current state and role,
     # then stores the action and responds with an ACTION_ACK, and if both clients have sent
@@ -267,8 +275,49 @@ class PhanatworkServerState:
                 },
             ))
 
+    def ready_text(self):
+        home = self.clients.get(self.role_to_session.get(pdu.ROLE_HOME))
+        away = self.clients.get(self.role_to_session.get(pdu.ROLE_AWAY))
+        home_team = home.team if home else "Home"
+        away_team = away.team if away else "Away"
+        return f"The {away_team} and {home_team} are both ready. Play ball!"
+
+    # configure the initial pitcher/batter based on the roster info
+    def set_starting_matchups(self):
+        offense_session = self.clients.get(self.role_to_session.get(self.offense_role))
+        defense_session = self.clients.get(self.role_to_session.get(self.defense_role))
+
+        if offense_session:
+            self.game_logic.batter_id = self.first_lineup_player_id(offense_session.players)
+        if defense_session:
+            self.game_logic.pitcher_id = self.first_pitcher_player_id(defense_session.players)
+
+    def first_lineup_player_id(self, players):
+        active_players = [
+            player for player in players
+            if int(player.get("player_status", pdu.PLAYER_ACTIVE)) == pdu.PLAYER_ACTIVE
+        ]
+        lineup_players = [
+            player for player in active_players
+            if int(player.get("lineup_slot", 0)) > 0
+        ]
+
+        if lineup_players:
+            first_batter = min(lineup_players, key=lambda player: int(player.get("lineup_slot", 0)))
+            return int(first_batter.get("player_id", 1))
+        if active_players:
+            return int(active_players[0].get("player_id", 1))
+        return 1
+    def first_pitcher_player_id(self, players):
+        for player in players:
+            if int(player.get("position", pdu.POS_UNKNOWN)) == pdu.POS_PITCHER:
+                return int(player.get("player_id", 0))
+        if players:
+            return int(players[0].get("player_id", 0))
+        return 0
+
     # sends current game state to both clients
-    async def broadcast_game_update(self, result_text:str, result_code:int, batter_id:int = 1, pitcher_id:int = 3, payload:dict = None):
+    async def broadcast_game_update(self, result_text:str, result_code:int, batter_id:int = None, pitcher_id:int = None, payload:dict = None):
         home = self.clients.get(self.role_to_session.get(pdu.ROLE_HOME))
         away = self.clients.get(self.role_to_session.get(pdu.ROLE_AWAY))
         if not home or not away:
@@ -313,7 +362,7 @@ class PhanatworkServerState:
         away = self.clients.get(self.role_to_session.get(pdu.ROLE_AWAY))
         if not home or not away:
             return
-        final_text = self.game_logic.final_text()
+        final_text = self.game_logic.final_text(self.team_name(pdu.ROLE_HOME), self.team_name(pdu.ROLE_AWAY))
         if self.log_protocol:
             print("[svr] sending GAME_OVER")
         for session in [home, away]:
@@ -328,8 +377,16 @@ class PhanatworkServerState:
                     "away_score": self.game_logic.away_score,
                     "winning_role": self.game_logic.winning_role(),
                     "final_text": final_text,
+                    "home_team": self.team_name(pdu.ROLE_HOME),
+                    "away_team": self.team_name(pdu.ROLE_AWAY),
                 },
             ))
+
+    def team_name(self, role:int):
+        session = self.clients.get(self.role_to_session.get(role))
+        if session and session.team:
+            return session.team
+        return pdu.role_name(role)
 
     # simple role assignment logic based on requested role and availability
     def assign_role(self, requested_role:int):

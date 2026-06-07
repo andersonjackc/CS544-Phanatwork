@@ -1,0 +1,23 @@
+{
+  "server": "localhost",
+  "port": 4433,
+  "name": "Jack",
+  "username": "home",
+  "password": "password",
+  "team": "Phillies",
+  "role": "home",
+  "play_mode": "manual",
+  "turns": 9999,
+  "players": [
+    {"player_id": 0, "player_name": "Cristopher Sanchez", "lineup_slot": 0, "position": "pitcher", "player_status": "active", "stats": [{"stat_id": "era_x100", "scale": 2, "stat_value": 350}]},
+    {"player_id": 1, "player_name": "Trea Turner", "lineup_slot": 1, "position": "shortstop", "player_status": "active"},
+    {"player_id": 2, "player_name": "Bryce Harper", "lineup_slot": 2, "position": "first_base", "player_status": "active"},
+    {"player_id": 3, "player_name": "Kyle Schwarber", "lineup_slot": 3, "position": "designated_hitter", "player_status": "active"},
+    {"player_id": 4, "player_name": "Alec Bohm", "lineup_slot": 4, "position": "third_base", "player_status": "active"},
+    {"player_id": 5, "player_name": "J.T. Realmuto", "lineup_slot": 5, "position": "catcher", "player_status": "active"},
+    {"player_id": 6, "player_name": "Bryson Stott", "lineup_slot": 6, "position": "second_base", "player_status": "active"},
+    {"player_id": 7, "player_name": "Brandon Marsh", "lineup_slot": 7, "position": "left_field", "player_status": "active"},
+    {"player_id": 8, "player_name": "Adolis Garcia", "lineup_slot": 8, "position": "right_field", "player_status": "active"},
+    {"player_id": 9, "player_name": "Justin Crawford", "lineup_slot": 9, "position": "center_field", "player_status": "active"}
+  ]
+}

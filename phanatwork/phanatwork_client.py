@@ -26,7 +26,6 @@ async def phanatwork_client_proto(scope:Dict, conn:PhanatworkQuicConnection):
     role = scope.get('role', pdu.ROLE_NONE)
     username = scope.get('username', name)
     password = scope.get('password', 'password')
-    action = scope.get('action', 0)
     turns = scope.get('turns', 1)
     play_mode = scope.get('play_mode', 'auto')
     auto_delay = float(scope.get('auto_delay', 0.25))
@@ -90,6 +89,7 @@ async def phanatwork_client_proto(scope:Dict, conn:PhanatworkQuicConnection):
     roster_update = await wait_for(conn, pdu.MSG_TYPE_ROSTER_UPDATE, log_protocol=log_protocol)
     if is_terminal(roster_update, log_protocol, on_connection_close, on_protocol_error):
         return
+    display_context = build_display_context(assigned_role, team, players, roster_update.payload)
 
     await send_datagram(
         conn,
@@ -109,6 +109,7 @@ async def phanatwork_client_proto(scope:Dict, conn:PhanatworkQuicConnection):
     # after both clients send READY, the server will send an initial GAME_UPDATE to both clients with the 
     # starting game state, and then the turn_id will increment from there for each turn,
     game_update = await wait_for(conn, pdu.MSG_TYPE_GAME_UPDATE, log_protocol=log_protocol)
+    enrich_game_payload(game_update, display_context)
     if on_game_update and game_update.mtype == pdu.MSG_TYPE_GAME_UPDATE:
         on_game_update(game_update.payload)
     if is_terminal(game_update, log_protocol, on_connection_close, on_protocol_error):
@@ -125,9 +126,9 @@ async def phanatwork_client_proto(scope:Dict, conn:PhanatworkQuicConnection):
             if play_mode == "auto" and auto_delay > 0:
                 await asyncio.sleep(auto_delay)
         elif play_mode == "manual":
-            selected_action = await asyncio.to_thread(prompt_action, assigned_role, game_update.payload, action)
+            selected_action = await asyncio.to_thread(prompt_action, assigned_role, game_update.payload)
         else:
-            selected_action = select_action(assigned_role, game_update.payload, action)
+            selected_action = select_action(assigned_role, game_update.payload)
             if auto_delay > 0:
                 await asyncio.sleep(auto_delay)
         selected_player = select_player(assigned_role, game_update.payload, players)
@@ -155,6 +156,7 @@ async def phanatwork_client_proto(scope:Dict, conn:PhanatworkQuicConnection):
             return
 
         game_update = await wait_for(conn, pdu.MSG_TYPE_GAME_UPDATE, label='resolved GAME_UPDATE', log_protocol=log_protocol)
+        enrich_game_payload(game_update, display_context)
         if on_game_update and game_update.mtype == pdu.MSG_TYPE_GAME_UPDATE:
             on_game_update(game_update.payload)
         if on_game_over and game_update.mtype == pdu.MSG_TYPE_GAME_OVER:
@@ -269,13 +271,48 @@ def format_datagram(datagram: pdu.Datagram):
     return json.dumps(visible, indent=2, sort_keys=True)
 
 
-# helper function to select a legal dummy action based on the role assigned by the server
-# and the current game update.  This is still dummy data, but it is no longer just one
-# hardcoded client message.
-# TODO: tie this in to be dynamic based on 'user' input or application input, or a config file
-def select_action(assigned_role:int, game_update:dict, requested_action:int):
-    if requested_action != 0:
-        return requested_action
+
+# build local display metadata from the client's own JOIN roster and the opponent ROSTER_UPDATE.
+def build_display_context(assigned_role:int, own_team:str, own_players:list, roster_payload:dict):
+    own_role = int(assigned_role)
+    if own_role == pdu.ROLE_HOME:
+        opponent_role = pdu.ROLE_AWAY
+    elif own_role == pdu.ROLE_AWAY:
+        opponent_role = pdu.ROLE_HOME
+    else:
+        opponent_role = pdu.ROLE_NONE
+
+    teams = {own_role: own_team, opponent_role: roster_payload.get("team", "Opponent")}
+    players_by_role = {own_role: own_players or [], opponent_role: roster_payload.get("players", [])}
+    return {"teams": teams, "players_by_role": players_by_role}
+
+# Add user-facing names to received game payloads without changing the v1.0 wire PDU format.
+def enrich_game_payload(datagram:pdu.Datagram, display_context:dict):
+    if datagram.mtype not in [pdu.MSG_TYPE_GAME_UPDATE, pdu.MSG_TYPE_GAME_OVER]:
+        return
+    payload = datagram.payload
+    teams = display_context.get("teams", {})
+    players_by_role = display_context.get("players_by_role", {})
+    payload["home_team"] = payload.get("home_team", teams.get(pdu.ROLE_HOME, "HOME"))
+    payload["away_team"] = payload.get("away_team", teams.get(pdu.ROLE_AWAY, "AWAY"))
+    offense_role = int(payload.get("offense_role", pdu.ROLE_NONE))
+    defense_role = int(payload.get("defense_role", pdu.ROLE_NONE))
+    payload["batter_name"] = player_name(players_by_role.get(offense_role, []), payload.get("batter_id"), "Batter")
+    payload["pitcher_name"] = player_name(players_by_role.get(defense_role, []), payload.get("pitcher_id"), "Pitcher")
+
+def player_name(players:list, player_id, fallback:str):
+    try:
+        wanted = int(player_id)
+    except (TypeError, ValueError):
+        return fallback
+    for player in players or []:
+        if int(player.get("player_id", 0)) == wanted:
+            return player.get("player_name", f"{fallback} #{wanted}")
+    return f"{fallback} #{wanted}"
+
+# helper function to select a legal automatic action based on the role assigned by the server
+# and the current game update.  Manual mode prompts the user instead.
+def select_action(assigned_role:int, game_update:dict):
     if assigned_role == game_update.get('offense_role'):
         return pdu.ACTION_BAT_SWING
     if assigned_role == game_update.get('defense_role'):
@@ -286,9 +323,10 @@ def select_action(assigned_role:int, game_update:dict, requested_action:int):
 # This is also hardcoded for now, but it selects the player based on the assigned role and the game update info
 def select_player(assigned_role:int, game_update:dict, players:list = None):
     if assigned_role == game_update.get('offense_role'):
-        return game_update.get('batter_id', first_player_id(players, pdu.POS_CATCHER)) or 1
+        return game_update.get('batter_id', first_player_id(players, pdu.POS_CATCHER))
     if assigned_role == game_update.get('defense_role'):
-        return game_update.get('pitcher_id', first_player_id(players, pdu.POS_PITCHER)) or 1
+        return first_player_id(players, pdu.POS_PITCHER)
+        # return game_update.get('pitcher_id', first_player_id(players, pdu.POS_PITCHER))
     return first_player_id(players, pdu.POS_UNKNOWN)
 
 # helper function to select the first player with the requested position from the roster
@@ -301,9 +339,7 @@ def first_player_id(players:list = None, position:int = pdu.POS_UNKNOWN):
     return int(players[0].get("player_id", 1))
 
 # manual CLI prompt for choosing an available action on a turn
-def prompt_action(assigned_role:int, game_update:dict, requested_action:int):
-    if requested_action != 0:
-        return requested_action
+def prompt_action(assigned_role:int, game_update:dict):
     if assigned_role == game_update.get('offense_role'):
         options = [
             ("swing", pdu.ACTION_BAT_SWING),
@@ -333,9 +369,12 @@ def prompt_action(assigned_role:int, game_update:dict, requested_action:int):
 # show the current game state in a small CLI-friendly format
 def print_game_state(game_update:dict):
     half = "top" if game_update.get('half_inning') == 0 else "bottom"
+    away_team = game_update.get('away_team', 'AWAY')
+    home_team = game_update.get('home_team', 'HOME')
     print("\nGame state")
     print(f"  inning: {half} {game_update.get('inning')}  outs: {game_update.get('outs')}  count: {game_update.get('balls')}-{game_update.get('strikes')}")
-    print(f"  score: AWAY {game_update.get('away_score')} - HOME {game_update.get('home_score')}")
+    print(f"  score: {away_team} {game_update.get('away_score')} - {home_team} {game_update.get('home_score')}")
+    print(f"  batter: {game_update.get('batter_name', game_update.get('batter_id'))}  pitcher: {game_update.get('pitcher_name', game_update.get('pitcher_id'))}")
     print(f"  last play: {game_update.get('result_text')}\n")
 
 # hardcoded helper function to generate a default player list for a team, since the client needs to send a player list on join

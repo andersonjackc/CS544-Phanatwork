@@ -13,12 +13,19 @@ import random
 # baseball game rules, just the message processing, since different 
 # implementations could have different rules
 def host_mode(args):
-    print("Starting baseball host")
+    print(r"""
+        ██████╗ ██╗  ██╗ █████╗ ███╗   ██╗ █████╗ ████████╗██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗
+        ██╔══██╗██║  ██║██╔══██╗████╗  ██║██╔══██╗╚══██╔══╝██║    ██║██╔═══██╗██╔══██╗██║ ██╔╝
+        ██████╔╝███████║███████║██╔██╗ ██║███████║   ██║   ██║ █╗ ██║██║   ██║██████╔╝█████╔╝ 
+        ██╔═══╝ ██╔══██║██╔══██║██║╚██╗██║██╔══██║   ██║   ██║███╗██║██║   ██║██╔══██╗██╔═██╗ 
+        ██║     ██║  ██║██║  ██║██║ ╚████║██║  ██║   ██║   ╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗
+        ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝   ╚═╝    ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝
+    """)
     game_logic = load_rules(args.rule_set, args.seed)
-    phanatwork_server.configure_server_state(game_logic, log_protocol=False)
+    phanatwork_server.configure_server_state(game_logic, log_protocol=True)
 
     server_config = quic_engine.build_server_quic_config(args.cert_file, args.key_file)
-    asyncio.run(quic_engine.run_server(args.listen, args.port, server_config, log_protocol=False))
+    asyncio.run(quic_engine.run_server(args.listen, args.port, server_config, log_protocol=True))
 
 # joining an existing hosted game, can be configured based on a config file as input
 def join_mode(args):
@@ -53,17 +60,24 @@ def join_mode(args):
 # helper function to nicely print the information relevant to the game
 def print_game_update(game_update):
     half = "Top" if game_update.get("half_inning") == 0 else "Bottom"
+    away_team = game_update.get("away_team", "Away")
+    home_team = game_update.get("home_team", "Home")
+    batter_name = game_update.get("batter_name", f"Batter #{game_update.get('batter_id')}")
+    pitcher_name = game_update.get("pitcher_name", f"Pitcher #{game_update.get('pitcher_id')}")
     print("\nGame update")
     print(f"  {half} {game_update.get('inning')} | Outs: {game_update.get('outs')} | Count: {game_update.get('balls')}-{game_update.get('strikes')}")
-    print(f"  Away {game_update.get('away_score')} - Home {game_update.get('home_score')}")
-    print(f"  Hits: Away {game_update.get('away_hits')} - Home {game_update.get('home_hits')}")
-    print(f"  Errors: Away {game_update.get('away_errors')} - Home {game_update.get('home_errors')}")
+    print(f"  Score: {away_team} {game_update.get('away_score')} - {home_team} {game_update.get('home_score')}")
+    print(f"  Hits: {away_team} {game_update.get('away_hits')} - {home_team} {game_update.get('home_hits')}")
+    print(f"  Errors: {away_team} {game_update.get('away_errors')} - {home_team} {game_update.get('home_errors')}")
+    print(f"  Batter: {batter_name} | Pitcher: {pitcher_name}")
     print(f"  {game_update.get('result_text')}")
 
 # final game message summarizing the game
 def print_game_over(game_over):
+    away_team = game_over.get("away_team", "Away")
+    home_team = game_over.get("home_team", "Home")
     print("\nGame over")
-    print(f"  Away {game_over.get('away_score')} - Home {game_over.get('home_score')}")
+    print(f"  Final score: {away_team} {game_over.get('away_score')} - {home_team} {game_over.get('home_score')}")
     print(f"  {game_over.get('final_text')}")
 
 # let the client know that the connection has been closed

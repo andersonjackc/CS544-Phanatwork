@@ -30,9 +30,9 @@ class SimpleBaseballRules:
         self.defense_role = pdu.ROLE_HOME
         self.game_over = False
         self.last_result_code = 0
-        self.last_result_text = "Both clients are ready. Send PLAY_ACTION."
-        self.batter_id = 1
-        self.pitcher_id = 3
+        self.last_result_text = ""
+        self.batter_id = 0
+        self.pitcher_id = 0
 
     def current_update(self, result_text:str = None, result_code:int = None, batter_id:int = None, pitcher_id:int = None):
         return {
@@ -99,28 +99,51 @@ class SimpleBaseballRules:
         return f"{action_text}: called strike {self.strikes}"
 
     def resolve_bunt(self, roll:int, action_text:str):
-        self.balls = 0
-        self.strikes = 0
-        if roll <= 20:
+        if roll <= 10:
+            self.balls = 0
+            self.strikes = 0
             self.add_hit(1)
             return f"{action_text}: bunt single"
+        if roll <= 28:
+            return self.record_foul(action_text, "bunt foul")
+        self.balls = 0
+        self.strikes = 0
         self.record_out()
         return f"{action_text}: bunt out"
 
     def resolve_swing(self, roll:int, action_text:str):
-        self.balls = 0
-        self.strikes = 0
-        if roll <= 18:
+        if roll <= 16:
+            self.balls = 0
+            self.strikes = 0
             self.add_hit(1)
             return f"{action_text}: single"
-        if roll <= 25:
+        if roll <= 23:
+            self.balls = 0
+            self.strikes = 0
             self.add_hit(2)
             return f"{action_text}: double"
-        if roll <= 29:
+        if roll <= 26:
+            self.balls = 0
+            self.strikes = 0
+            self.add_hit(3)
+            return f"{action_text}: triple"
+        if roll <= 30:
+            self.balls = 0
+            self.strikes = 0
             self.add_hit(4)
             return f"{action_text}: home run"
+        if roll <= 48:
+            return self.record_foul(action_text, "foul ball")
+        self.balls = 0
+        self.strikes = 0
         self.record_out()
         return f"{action_text}: out"
+
+    def record_foul(self, action_text:str, label:str):
+        if self.strikes < 2:
+            self.strikes += 1
+            return f"{action_text}: {label}, strike {self.strikes}"
+        return f"{action_text}: {label}, count stays {self.balls}-{self.strikes}"
 
     # helper function to update the number of hits
     def add_hit(self, bases:int):
@@ -195,12 +218,12 @@ class SimpleBaseballRules:
             return pdu.ROLE_AWAY
         return pdu.ROLE_NONE
 
-    def final_text(self):
+    def final_text(self, home_team:str = "HOME", away_team:str = "AWAY"):
         if self.winning_role() == pdu.ROLE_HOME:
-            return f"Game over: HOME wins {self.home_score}-{self.away_score}"
+            return f"Game over: {home_team} wins {self.home_score}-{self.away_score}"
         if self.winning_role() == pdu.ROLE_AWAY:
-            return f"Game over: AWAY wins {self.away_score}-{self.home_score}"
-        return f"Game over: tie {self.home_score}-{self.away_score}"
+            return f"Game over: {away_team} wins {self.away_score}-{self.home_score}"
+        return f"Game over: {home_team} and {away_team} tie {self.home_score}-{self.away_score}"
 
     def describe_actions(self, offense_action:dict, defense_action:dict):
         return f"offense={action_name(offense_action.get('action_type'))} defense={action_name(defense_action.get('action_type'))}"
@@ -216,6 +239,28 @@ class OneOutBaseballRules(SimpleBaseballRules):
 class ShortBaseballRules(SimpleBaseballRules):
     def __init__(self, seed:int = None):
         super().__init__(innings=1, outs_per_half=3, seed=seed)
+
+# adding a new game mode that no matter the actions the result is an out.  This is useful for testing, as the
+# other rules are based on randomness, so are nondeterministic.
+
+class AlwaysOutOneOutRules(OneOutBaseballRules):
+    def resolve_play(self, offense_action: dict, defense_action: dict):
+        self.batter_id = int(offense_action.get("player_id", self.batter_id))
+        self.pitcher_id = int(defense_action.get("player_id", self.pitcher_id))
+
+        self.balls = 0
+        self.strikes = 0
+        self.record_out()
+
+        result_text = "test forced out"
+
+        if self.outs >= self.outs_per_half:
+            self.advance_half_inning()
+
+        self.event_id += 1
+        self.last_result_code = 0
+        self.last_result_text = result_text
+        return self.current_update(result_text, 0, self.batter_id, self.pitcher_id)
 
 
 # helper function to convert the enum to a string
