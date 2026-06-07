@@ -164,7 +164,7 @@ async def phanatwork_client_proto(scope:Dict, conn:PhanatworkQuicConnection):
         completed_turns += 1
 
     if log_protocol:
-        print('[cli] completed requested turn limit; closing local connection without sending protocol CLOSE')
+        print('[cli] completed requested turn limit;')
     if conn.close:
         conn.close()
 
