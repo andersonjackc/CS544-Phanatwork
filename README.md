@@ -59,12 +59,12 @@ The python packages that were utilized are defined in the `requirements.txt` fil
 # Certificates
 Since Phanatwork is built upon QUIC, it needs certificates and private keys for TLS to work.  I utilized the `gencert.sh` script from the example project, and it has its own `README.md` that was provided in the example project.  I also have pushed the development certificate so regeneration should not be necessary until June of 2027.
 
-## Running Phanatwork
+# Running Phanatwork
 The client and server can be run using the main UI baseball game app and a debugging script.  Both are detailed below, but the main script to run, use, and grade against is the `baseball_app.py` version.
 
 You will need three terminals to run the Phanatwork example.  One to run the server, and then one for each client.
 
-# Running the Server
+## Running the Server
 You can run the server in a few different ways.  
 
 To run the baseball game simulator version of the server, you can do either of the following.
@@ -82,7 +82,7 @@ To run the Phanatwork protocol debugger version of the server, you can do either
 
 ```python phanatwork.py server --listen localhost --port 4433 --cert-file ./certs/quic_certificate.pem --key-file ./certs/quic_private_key.pem``` will allow you to customize the address, port number and cert/key locations.
 
-# Running the Client.
+## Running the Client.
 Similar to the server, you can run the client in a few ways.
 ```python baseball_app.py join``` will join an existing server using all of the default parameters.  That is localhost for address, 4433 for port number, the same cert file path as the default for the server, Team for team name, Player for display name, "either" for desired role, player for username, password for password, 9999 for number of turns, manual for the play mode, and 0.25 seconds for the delay between auto actions.
 
@@ -189,6 +189,14 @@ This project can be taken in several different directions, as there were some po
 - While the server is concurrent, allowing multiple clients at a time, currently only one game can be played at any one time.
 - The UI is all CLI based, but the framework is there for a more complex GUI to be developed, as Phanatwork is implementation independent.
 - Error handling ends the client connection, but some errors should be recoverable.
+
+# Extra Credit Content
+- The server supports concurrent client handling, which is required for the two client and one server Phanatwork architecture.
+- The implementation process revealed design updates such as the need to update the DFA to support an initial GAME_UPDATE message as well as the increased timeout.  These are detailed earlier in the README, and have been updated in the submitted design document.
+- I have created a demo video: [https://www.youtube.com/watch?v=lClG7GtQpi0](https://www.youtube.com/watch?v=lClG7GtQpi0)
+- GitHub was utilized during development for version control.
+- Created an automated testing script
+- I also submitted the ospf-advanced-setup.pdf lab
 
 # Final Note
 This project was meant to focus on the protocol design, not a baseball game simulation.  The main focuses were:
