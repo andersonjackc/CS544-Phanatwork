@@ -284,6 +284,18 @@ class PhanatworkServerState:
 
     # configure the initial pitcher/batter based on the roster info
     def set_starting_matchups(self):
+        home_session = self.clients.get(self.role_to_session.get(pdu.ROLE_HOME))
+        away_session = self.clients.get(self.role_to_session.get(pdu.ROLE_AWAY))
+
+        if hasattr(self.game_logic, "configure_roster"):
+            if home_session:
+                self.game_logic.configure_roster(pdu.ROLE_HOME, home_session.players)
+            if away_session:
+                self.game_logic.configure_roster(pdu.ROLE_AWAY, away_session.players)
+            if hasattr(self.game_logic, "initialize_matchup_from_rosters"):
+                self.game_logic.initialize_matchup_from_rosters()
+            return
+
         offense_session = self.clients.get(self.role_to_session.get(self.offense_role))
         defense_session = self.clients.get(self.role_to_session.get(self.defense_role))
 

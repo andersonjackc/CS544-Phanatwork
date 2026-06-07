@@ -33,6 +33,56 @@ class SimpleBaseballRules:
         self.last_result_text = ""
         self.batter_id = 0
         self.pitcher_id = 0
+        self.batting_orders = {pdu.ROLE_HOME: [], pdu.ROLE_AWAY: []}
+        self.batting_order_index = {pdu.ROLE_HOME: 0, pdu.ROLE_AWAY: 0}
+        self.pitchers = {pdu.ROLE_HOME: 0, pdu.ROLE_AWAY: 0}
+
+
+    # configure each team's batting order from the roster sent through the protocol.
+    def configure_roster(self, role:int, players:list):
+        active_players = [
+            player for player in players or []
+            if int(player.get("player_status", pdu.PLAYER_ACTIVE)) == pdu.PLAYER_ACTIVE
+        ]
+
+        lineup_players = [
+            player for player in active_players
+            if int(player.get("lineup_slot", 0)) > 0
+        ]
+        lineup_players.sort(key=lambda player: int(player.get("lineup_slot", 0)))
+
+        if lineup_players:
+            self.batting_orders[role] = [int(player.get("player_id", 1)) for player in lineup_players]
+        else:
+            self.batting_orders[role] = [int(player.get("player_id", 1)) for player in active_players]
+
+        self.batting_order_index[role] = 0
+
+        for player in active_players:
+            if int(player.get("position", pdu.POS_UNKNOWN)) == pdu.POS_PITCHER:
+                self.pitchers[role] = int(player.get("player_id", 0))
+                break
+        else:
+            if active_players:
+                self.pitchers[role] = int(active_players[0].get("player_id", 0))
+
+    def initialize_matchup_from_rosters(self):
+        self.batter_id = self.current_batter_id(self.offense_role)
+        self.pitcher_id = self.current_pitcher_id(self.defense_role)
+
+    def current_batter_id(self, role:int):
+        order = self.batting_orders.get(role, [])
+        if not order:
+            return self.batter_id or 1
+        return order[self.batting_order_index.get(role, 0) % len(order)]
+
+    def current_pitcher_id(self, role:int):
+        return self.pitchers.get(role, self.pitcher_id) or self.pitcher_id or 0
+
+    def advance_batter(self, role:int):
+        order = self.batting_orders.get(role, [])
+        if order:
+            self.batting_order_index[role] = (self.batting_order_index.get(role, 0) + 1) % len(order)
 
     def current_update(self, result_text:str = None, result_code:int = None, batter_id:int = None, pitcher_id:int = None):
         return {
@@ -61,8 +111,9 @@ class SimpleBaseballRules:
     # i made them all be rng based, but the functionality to tie into the
     # players stats is available
     def resolve_play(self, offense_action:dict, defense_action:dict):
-        self.batter_id = int(offense_action.get('player_id', self.batter_id))
-        self.pitcher_id = int(defense_action.get('player_id', self.pitcher_id))
+        batting_role = self.offense_role
+        self.batter_id = self.current_batter_id(batting_role)
+        self.pitcher_id = int(defense_action.get('player_id', self.current_pitcher_id(self.defense_role)))
         action_text = self.describe_actions(offense_action, defense_action)
         roll = self.rng.randint(1, 100)
 
@@ -73,9 +124,16 @@ class SimpleBaseballRules:
         else:
             result_text = self.resolve_swing(roll, action_text)
 
+        # A completed plate appearance resets the count to 0-0 and should replace the batter
+        # Advance the batting-order index for the team that was batting before any side switch.
+        if self.balls == 0 and self.strikes == 0:
+            self.advance_batter(batting_role)
+
         if self.outs >= self.outs_per_half:
             self.advance_half_inning()
 
+        self.batter_id = self.current_batter_id(self.offense_role)
+        self.pitcher_id = self.current_pitcher_id(self.defense_role)
         self.event_id += 1
         self.last_result_code = 0
         self.last_result_text = result_text
@@ -245,18 +303,22 @@ class ShortBaseballRules(SimpleBaseballRules):
 
 class AlwaysOutOneOutRules(OneOutBaseballRules):
     def resolve_play(self, offense_action: dict, defense_action: dict):
-        self.batter_id = int(offense_action.get("player_id", self.batter_id))
-        self.pitcher_id = int(defense_action.get("player_id", self.pitcher_id))
+        batting_role = self.offense_role
+        self.batter_id = self.current_batter_id(batting_role)
+        self.pitcher_id = int(defense_action.get("player_id", self.current_pitcher_id(self.defense_role)))
 
         self.balls = 0
         self.strikes = 0
         self.record_out()
+        self.advance_batter(batting_role)
 
         result_text = "test forced out"
 
         if self.outs >= self.outs_per_half:
             self.advance_half_inning()
 
+        self.batter_id = self.current_batter_id(self.offense_role)
+        self.pitcher_id = self.current_pitcher_id(self.defense_role)
         self.event_id += 1
         self.last_result_code = 0
         self.last_result_text = result_text
