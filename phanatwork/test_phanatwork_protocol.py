@@ -10,6 +10,7 @@ import pdu
 import phanatwork_server
 from phanatwork_quic import PhanatworkQuicConnection, QuicStreamEvent
 from phanatwork_state import PhanatworkServerState
+from baseball_simulator.simple_baseball import OneOutBaseballRules
 from phanatwork_client import default_players
 
 # abstrac test case results for easy reporting and debugging
@@ -236,6 +237,64 @@ async def test_valid_complete_turn_resolves_and_increments_turn():
     assert state.turn_id == starting_turn + 1
     assert state.actions == {}
 
+# verify that the server can use a different injected game rule set without changing the protocol handler
+async def test_valid_injected_one_out_rules_advance_half_inning():
+    state = PhanatworkServerState(OneOutBaseballRules(innings=2, seed=7))
+    home = await make_peer(state)
+    away = await make_peer(state)
+
+    await send_hello(state, home, "Home")
+    await send_auth(state, home, "home", "password")
+    await send_join(state, home, "Home Team", pdu.ROLE_HOME)
+
+    await send_hello(state, away, "Away")
+    await send_auth(state, away, "away", "password")
+    await send_join(state, away, "Away Team", pdu.ROLE_AWAY)
+
+    clear_all(home, away)
+    await send_ready(state, home)
+    await send_ready(state, away)
+    clear_all(home, away)
+
+    await send_action(state, away, pdu.ACTION_BAT_SWING, player_id=1)
+    await send_action(state, home, pdu.ACTION_PITCH_FASTBALL, player_id=3)
+
+    game_update = last_message(away)
+    assert game_update.mtype == pdu.MSG_TYPE_GAME_UPDATE
+    assert game_update.payload.get("half_inning") == 1
+    assert game_update.payload.get("offense_role") == pdu.ROLE_HOME
+    assert game_update.payload.get("defense_role") == pdu.ROLE_AWAY
+
+# verify that a client cannot send a protocol CLOSE, because CLOSE is server initiated only
+# adding this as I initially, incorrectly, had the client be able to send it, which does not match the DFA
+async def test_client_close_pdu_is_rejected():
+    state, home, away = await setup_ready_match()
+    clear_all(home, away)
+
+    await state.handle_pdu(home.session, pdu.Datagram(
+        pdu.MSG_TYPE_CLOSE,
+        "CLOSE",
+        session_id=home.session.session_id,
+        turn_id=state.turn_id,
+        role=home.session.role,
+        payload={"close_reason": pdu.CLOSE_NORMAL, "close_text": "leaving"},
+    ))
+
+    assert_error(home, pdu.ERR_INVALID_STATE)
+    assert away.sent == []
+    assert home.session.closed is False
+
+# verify that the server sends CLOSE to the remaining peer when a client connection disappears
+async def test_transport_disconnect_notifies_opponent_with_server_close():
+    state, home, away = await setup_ready_match()
+    clear_all(home, away)
+
+    await state.handle_close(home.session)
+
+    assert_last_type(away, pdu.MSG_TYPE_CLOSE)
+    assert home.sent == []
+    assert home.session.closed is True
+
 
 # DFA Invalid Tests
 # Test that incorrect packets or out of order packets are rejected with the proper error
@@ -444,6 +503,8 @@ TESTS = [
     ("DFA passing cases", "Two clients joining triggers ROSTER_UPDATE", test_valid_two_clients_join_triggers_roster_update),
     ("DFA passing cases", "Both clients READY triggers initial GAME_UPDATE", test_valid_ready_sequence_triggers_initial_game_update),
     ("DFA passing cases", "Valid actions resolve a turn and increment turn_id", test_valid_complete_turn_resolves_and_increments_turn),
+    ("DFA passing cases", "Injected one-out rules advance the half inning", test_valid_injected_one_out_rules_advance_half_inning),
+    ("DFA passing cases", "Transport disconnect notifies opponent with server CLOSE", test_transport_disconnect_notifies_opponent_with_server_close),
 
     ("DFA validation errors", "AUTH before HELLO is rejected", test_auth_before_hello),
     ("DFA validation errors", "JOIN before AUTH is rejected", test_join_before_auth),
@@ -452,6 +513,7 @@ TESTS = [
     ("DFA validation errors", "Wrong action for current role is rejected", test_wrong_action_for_role),
     ("DFA validation errors", "Duplicate action in same turn is rejected", test_duplicate_action_same_turn),
     ("DFA validation errors", "Stale turn id is rejected", test_stale_turn_id),
+    ("DFA validation errors", "Client protocol CLOSE is rejected", test_client_close_pdu_is_rejected),
 
     ("Malformed PDU errors", "Too-short PDU header returns MALFORMED_PDU", test_short_header_malformed_pdu),
     ("Malformed PDU errors", "Unsupported major version returns UNSUPPORTED_VERSION", test_unsupported_version_error),

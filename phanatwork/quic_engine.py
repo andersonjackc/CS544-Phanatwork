@@ -12,6 +12,7 @@ import json
 
 from phanatwork_quic import PhanatworkQuicConnection, QuicStreamEvent
 import phanatwork_server, phanatwork_client
+import pdu
 
 ALPN_PROTOCOL = "phanatwork-protocol"
 
@@ -25,7 +26,8 @@ ALPN_PROTOCOL = "phanatwork-protocol"
 def build_server_quic_config(cert_file, key_file) -> QuicConfiguration:
     configuration = QuicConfiguration(
         alpn_protocols=[ALPN_PROTOCOL], 
-        is_client=False
+        is_client=False,
+        idle_timeout=pdu.PHAN_IDLE_TIMEOUT_V1_0
     )
     configuration.load_cert_chain(cert_file, key_file)
   
@@ -33,7 +35,8 @@ def build_server_quic_config(cert_file, key_file) -> QuicConfiguration:
 
 def build_client_quic_config(cert_file = None):
     configuration = QuicConfiguration(alpn_protocols=[ALPN_PROTOCOL], 
-                                      is_client=True)
+                                      is_client=True,
+                                      idle_timeout=pdu.PHAN_IDLE_TIMEOUT_V1_0)
     if cert_file:
         configuration.load_verify_locations(cert_file)
   
@@ -83,7 +86,7 @@ class AsyncQuicServer(QuicConnectionProtocol):
         # without sending a close frame, which can happen if the client process is killed or crashes
         if isinstance(event, ConnectionTerminated):
             for handler in list(self._handlers.values()):
-                handler.connection_closed()
+                handler.connection_closed(event)
             self._handlers.clear()
             return
         if isinstance(event, StreamDataReceived):
@@ -110,7 +113,7 @@ class AsyncQuicServer(QuicConnectionProtocol):
         # without sending a close frame, which can happen if the client process is killed or crashes
         if isinstance(event, ConnectionTerminated):
             if self._mode == CLIENT_MODE and self._client_handler:
-                self._client_handler.connection_closed()
+                self._client_handler.connection_closed(event)
             else:
                 self._quic_server_event_dispatch(event)
             return
@@ -137,8 +140,9 @@ class SessionTicketStore:
         return self.tickets.pop(label, None)
 
 
-async def run_server(server, server_port, configuration):  
-    print("[svr] Phanatwork server starting...")  
+async def run_server(server, server_port, configuration, log_protocol: bool = True):  
+    if log_protocol:
+        print("[svr] Phanatwork server starting...")  
     await serve(server, server_port, configuration=configuration, 
             create_protocol=AsyncQuicServer,
             session_ticket_fetcher=SessionTicketStore().pop,
@@ -184,10 +188,17 @@ class PhanatworkServerRequestHandler:
                             event.end_stream)
         )
     # heloer function to close the connections
-    # when the client crashes
-    def connection_closed(self) -> None:
+    # when the client crashes or timesout
+    def connection_closed(self, event = None) -> None:
+        reason_phrase = getattr(event, "reason_phrase", "") if event else ""
+        error_code = getattr(event, "error_code", None) if event else None
+        reason_text = reason_phrase or "Connection closed"
+        reason_value = pdu.CLOSE_ERROR
+        if "idle" in reason_text.lower() or "timeout" in reason_text.lower():
+            reason_value = pdu.CLOSE_TIMEOUT
+            reason_text = "Connection timed out"
         self.queue.put_nowait(
-            QuicStreamEvent(self.stream_id, b"", True)
+            QuicStreamEvent(self.stream_id, b"", True, reason_value, reason_text)
         )
 
     async def receive(self) -> QuicStreamEvent:

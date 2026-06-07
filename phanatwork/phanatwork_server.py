@@ -3,8 +3,13 @@ from typing import Coroutine,Dict
 import json
 from phanatwork_quic import PhanatworkQuicConnection, QuicStreamEvent
 import pdu
-from phanatwork_state import SERVER_STATE
+from phanatwork_state import SERVER_STATE, PhanatworkServerState
 
+# configures the game logic based on the applications implementation, rather than the protocol 
+def configure_server_state(game_logic = None, log_protocol: bool = True):
+    global SERVER_STATE
+    SERVER_STATE = PhanatworkServerState(game_logic, log_protocol=log_protocol)
+    return SERVER_STATE
 
 # This is the main server protocol handler
 # copied from the example class echo_server, but modified to have a loop for

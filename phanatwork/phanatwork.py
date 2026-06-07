@@ -16,6 +16,8 @@ def client_mode(args):
     server_port = args.port
     cert_file = args.cert_file
     desired_role = role_from_string(args.role)
+    manual_mode = args.action == "manual"
+
     scope = {
         "name": args.name,
         "team": args.team,
@@ -25,6 +27,7 @@ def client_mode(args):
         "password": args.password,
         "action": action_from_string(args.action),
         "turns": args.turns,
+        "play_mode": "manual" if manual_mode else "auto",
     }
     
     config = quic_engine.build_client_quic_config(cert_file)
@@ -81,7 +84,7 @@ def parse_args():
     client_parser.add_argument('-m','--message', default='This is a Phanatwork test message', help='Text message to send after START')
     client_parser.add_argument('-u','--username', default='player', help='Username for AUTH')
     client_parser.add_argument('--password', default='password', help='Password for AUTH')
-    client_parser.add_argument('-a','--action', default='auto', choices=['auto','fastball','curveball','changeup','swing','take','bunt'], help='PLAY_ACTION to send after GAME_UPDATE')
+    client_parser.add_argument('-a','--action', default='auto', choices=['auto', 'manual', 'fastball','curveball','changeup','swing','take','bunt'], help='PLAY_ACTION to send after GAME_UPDATE')
     client_parser.add_argument('--turns', type=int, default=3, help='Number of dummy turns to play before CLOSE')
 
     server_parser = subparsers.add_parser('server')

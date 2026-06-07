@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict
 
 import pdu
+from baseball_simulator.simple_baseball import SimpleBaseballRules
 
 
 SendPdu = Callable[[pdu.Datagram], Awaitable[None]]
@@ -25,15 +26,18 @@ class ClientSession:
 
 class PhanatworkServerState:
     # setting up the initial server state, with session tracking and role assignment
-    def __init__(self):
+    def __init__(self, game_logic = None, log_protocol: bool = True):
+        self.game_logic = game_logic or SimpleBaseballRules() # defaulting to the normal rules for ease of testing
+        self.log_protocol = log_protocol
         self.next_session_id = 1
         self.clients: Dict[int, ClientSession] = {}
         self.role_to_session: Dict[int, int] = {}
+        self.game_logic.reset()
         self.turn_id = 1
         self.event_id = 1
         self.main_state = "SETUP"
-        self.offense_role = pdu.ROLE_AWAY
-        self.defense_role = pdu.ROLE_HOME
+        self.offense_role = self.game_logic.offense_role
+        self.defense_role = self.game_logic.defense_role
         self.actions: Dict[int, dict] = {}
 
     # on new client connection, register them and create a session for them,
@@ -43,13 +47,15 @@ class PhanatworkServerState:
         self.next_session_id += 1
         session = ClientSession(session_id, send_pdu)
         self.clients[session_id] = session
-        print(f"[svr] registered session {session_id}")
+        if self.log_protocol:
+            print(f"[svr] registered session {session_id}")
         return session
 
     # main server protocol handler, called from the server loop,
     # which dispatches to the appropriate handler function based on message type
     async def handle_pdu(self, session: ClientSession, datagram: pdu.Datagram):
-        print(f"[svr] session {session.session_id} received {pdu.msg_type_name(datagram.mtype)}")
+        if self.log_protocol:
+            print(f"[svr] session {session.session_id} received {pdu.msg_type_name(datagram.mtype)}")
 
         if datagram.mtype != pdu.MSG_TYPE_HELLO:
             if datagram.session_id != session.session_id:
@@ -69,8 +75,6 @@ class PhanatworkServerState:
             await self.handle_ready(session, datagram)
         elif datagram.mtype == pdu.MSG_TYPE_PLAY_ACTION:
             await self.handle_play_action(session, datagram)
-        elif datagram.mtype == pdu.MSG_TYPE_CLOSE:
-            await self.handle_close(session, datagram)
         else:
             await self.send_error(session, pdu.ERR_INVALID_STATE, "Unexpected message type")
 
@@ -164,7 +168,8 @@ class PhanatworkServerState:
             return
 
         session.ready = bool(datagram.payload.get("ready", True))
-        print(f"[svr] session {session.session_id} is READY")
+        if self.log_protocol:
+            print(f"[svr] session {session.session_id} is READY")
 
         if self.both_clients_ready():
             self.main_state = "WAIT_BOTH_ACTIONS"
@@ -209,9 +214,11 @@ class PhanatworkServerState:
 
     # close handler marks the session as closed and frees the assigned role
     async def handle_close(self, session: ClientSession, datagram: pdu.Datagram = None):
+        await self.broadcast_close(session, "Opponent disconnected")
         session.closed = True
         self.cleanup_session(session)
-        print(f"[svr] session {session.session_id} closed")
+        if self.log_protocol:
+            print(f"[svr] session {session.session_id} closed")
 
     # error handler sends an ERROR message back to the client with a spec error code
     async def send_error(self, session: ClientSession, error_code:int, text: str):
@@ -224,11 +231,25 @@ class PhanatworkServerState:
             payload={"error_code": error_code, "error_text": text},
         ))
 
+    # send CLOSE to the remaining peer when one side leaves the match
+    async def broadcast_close(self, closed_session: ClientSession, text: str):
+        for session in list(self.clients.values()):
+            if session.session_id != closed_session.session_id and not session.closed:
+                await session.send_pdu(pdu.Datagram(
+                    pdu.MSG_TYPE_CLOSE,
+                    text,
+                    session_id=session.session_id,
+                    turn_id=self.turn_id,
+                    role=session.role,
+                    payload={"close_reason": pdu.CLOSE_ERROR, "close_text": text},
+                ))
+
     # broadcast a roster update to both clients when they have both joined, with their opponent's info
     async def broadcast_roster_update(self):
         home = self.clients[self.role_to_session[pdu.ROLE_HOME]]
         away = self.clients[self.role_to_session[pdu.ROLE_AWAY]]
-        print("[svr] both clients joined; sending ROSTER_UPDATE")
+        if self.log_protocol:
+            print("[svr] both clients joined; sending ROSTER_UPDATE")
 
         for session in [home, away]:
             opponent = away if session.role == pdu.ROLE_HOME else home
@@ -247,16 +268,17 @@ class PhanatworkServerState:
             ))
 
     # sends current game state to both clients
-    async def broadcast_game_update(self, result_text:str, result_code:int, batter_id:int = 1, pitcher_id:int = 3):
+    async def broadcast_game_update(self, result_text:str, result_code:int, batter_id:int = 1, pitcher_id:int = 3, payload:dict = None):
         home = self.clients.get(self.role_to_session.get(pdu.ROLE_HOME))
         away = self.clients.get(self.role_to_session.get(pdu.ROLE_AWAY))
         if not home or not away:
             return
 
-        # send a game update to both clients with the current game state and the result of the last turn resolution
-        # TODO: Currently hardcoded values for the game state but this will 
-        # be tied into the actual game logic once it is implemented.
-        print("[svr] sending GAME_UPDATE")
+        update_payload = payload or self.game_logic.current_update(result_text, result_code, batter_id, pitcher_id)
+        self.offense_role = int(update_payload.get("offense_role", self.offense_role))
+        self.defense_role = int(update_payload.get("defense_role", self.defense_role))
+        if self.log_protocol:
+            print("[svr] sending GAME_UPDATE")
         for session in [home, away]:
             await session.send_pdu(pdu.Datagram(
                 pdu.MSG_TYPE_GAME_UPDATE,
@@ -264,44 +286,50 @@ class PhanatworkServerState:
                 session_id=session.session_id,
                 turn_id=self.turn_id,
                 role=session.role,
-                payload={
-                    "event_id": self.event_id,
-                    "batter_id": batter_id,
-                    "pitcher_id": pitcher_id,
-                    "inning": 1,
-                    "half_inning": 0,
-                    "outs": 0,
-                    "balls": 0,
-                    "strikes": 0,
-                    "bases": 0,
-                    "offense_role": self.offense_role,
-                    "defense_role": self.defense_role,
-                    "home_score": 0,
-                    "home_hits": 0,
-                    "home_errors": 0,
-                    "away_score": 0,
-                    "away_hits": 0,
-                    "away_errors": 0,
-                    "result_code": result_code,
-                    "result_text": result_text,
-                },
+                payload=update_payload,
             ))
 
-    # resolves the turn based on the stored offense and defense actions, then clears the actions and increments the turn and event ids
-    # TODO: Tie into a more realistic game logic resolution
-    # This should be passed to the protocol from the application utilizing Phanatwork
-    # not within the protocol itself
+    # resolves the turn by calling the injected game logic, then clears the actions and increments the turn id
     async def resolve_turn(self):
         offense_action = self.actions.get(self.offense_role, {})
         defense_action = self.actions.get(self.defense_role, {})
-        batter_id = int(offense_action.get('player_id', 1))
-        pitcher_id = int(defense_action.get('player_id', 3))
-        result_text = f"Resolved turn: offense={offense_action.get('action_type')} defense={defense_action.get('action_type')}"
+        update_payload = self.game_logic.resolve_play(offense_action, defense_action)
+        result_text = update_payload.get("result_text", "Resolved turn")
+        self.event_id = int(update_payload.get("event_id", self.event_id))
+        self.offense_role = int(update_payload.get("offense_role", self.offense_role))
+        self.defense_role = int(update_payload.get("defense_role", self.defense_role))
         self.actions.clear()
         self.turn_id += 1
-        self.event_id += 1
+        if self.game_logic.game_over:
+            self.main_state = "GAME_OVER"
+            await self.broadcast_game_over()
+            return
         self.main_state = "WAIT_BOTH_ACTIONS"
-        await self.broadcast_game_update(result_text, 0, batter_id, pitcher_id)
+        await self.broadcast_game_update(result_text, 0, payload=update_payload)
+
+    # sends GAME_OVER to both clients when the injected game logic decides that the game is complete
+    async def broadcast_game_over(self):
+        home = self.clients.get(self.role_to_session.get(pdu.ROLE_HOME))
+        away = self.clients.get(self.role_to_session.get(pdu.ROLE_AWAY))
+        if not home or not away:
+            return
+        final_text = self.game_logic.final_text()
+        if self.log_protocol:
+            print("[svr] sending GAME_OVER")
+        for session in [home, away]:
+            await session.send_pdu(pdu.Datagram(
+                pdu.MSG_TYPE_GAME_OVER,
+                final_text,
+                session_id=session.session_id,
+                turn_id=self.turn_id,
+                role=session.role,
+                payload={
+                    "home_score": self.game_logic.home_score,
+                    "away_score": self.game_logic.away_score,
+                    "winning_role": self.game_logic.winning_role(),
+                    "final_text": final_text,
+                },
+            ))
 
     # simple role assignment logic based on requested role and availability
     def assign_role(self, requested_role:int):
@@ -338,11 +366,12 @@ class PhanatworkServerState:
     # resets the match state to the initial values,
     # ready for a new match to be set up once both clients have left or sent CLEAN
     def reset_match_state(self):
+        self.game_logic.reset()
         self.turn_id = 1
         self.event_id = 1
         self.main_state = "SETUP"
-        self.offense_role = pdu.ROLE_AWAY
-        self.defense_role = pdu.ROLE_HOME
+        self.offense_role = self.game_logic.offense_role
+        self.defense_role = self.game_logic.defense_role
         self.actions.clear()
 
     # helper function to check if both clients have joined

@@ -1,0 +1,28 @@
+{
+  "server": "localhost",
+  "port": 4433,
+  "name": "Away Bot",
+  "username": "away",
+  "password": "password",
+  "team": "Away Phanatics",
+  "role": "away",
+  "play_mode": "auto",
+  "auto_delay": 0.25,
+  "turns": 50,
+  "players": [
+    {
+      "player_id": 1,
+      "player_name": "Away Catcher",
+      "lineup_slot": 1,
+      "position": "catcher",
+      "player_status": "active"
+    },
+    {
+      "player_id": 3,
+      "player_name": "Away Pitcher",
+      "lineup_slot": 0,
+      "position": "pitcher",
+      "player_status": "active"
+    }
+  ]
+}
