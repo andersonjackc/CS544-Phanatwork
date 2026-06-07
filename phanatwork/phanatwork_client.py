@@ -6,6 +6,7 @@ import pdu
 
 # currently setting both error and close to make the client stop
 # TODO: Need to consider how to handle errors that are recoverable
+# can do in a v1.1, but for now not as important as everything else
 TERMINAL_MESSAGE_TYPES = {pdu.MSG_TYPE_ERROR, pdu.MSG_TYPE_CLOSE, pdu.MSG_TYPE_GAME_OVER}
 
 
@@ -378,8 +379,6 @@ def print_game_state(game_update:dict):
     print(f"  last play: {game_update.get('result_text')}\n")
 
 # hardcoded helper function to generate a default player list for a team, since the client needs to send a player list on join
-# TODO: Expand this to be more dynamic and not hardcoded, and to include more player info and stats as needed
-# planning to allow pulling from a config file
 def default_players(team_name):
     return [
         {
