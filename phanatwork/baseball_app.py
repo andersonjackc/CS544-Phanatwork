@@ -69,8 +69,8 @@ def print_game_update(game_update):
     print(f"  Score: {away_team} {game_update.get('away_score')} - {home_team} {game_update.get('home_score')}")
     print(f"  Hits: {away_team} {game_update.get('away_hits')} - {home_team} {game_update.get('home_hits')}")
     print(f"  Errors: {away_team} {game_update.get('away_errors')} - {home_team} {game_update.get('home_errors')}")
-    print(f"  Batter: {batter_name} | Pitcher: {pitcher_name}")
     print(f"  {game_update.get('result_text')}")
+    print(f"  Current Batter: {batter_name} | Current Pitcher: {pitcher_name}")
 
 # final game message summarizing the game
 def print_game_over(game_over):
